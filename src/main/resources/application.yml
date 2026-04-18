@@ -68,7 +68,7 @@ document:
 # RAG 配置
 rag:
   top-k: 3  # 检索返回的最相似文档数量
-  model: "qwen3-max-2025-09-23"  # 大语言模型名称
+  model: "qvq-max-2025-03-25"  # 大语言模型名称
 
 # Prometheus 配置
 prometheus:
