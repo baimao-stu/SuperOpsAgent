@@ -94,9 +94,16 @@ public class QueryMetricsTools {
                     SimplifiedAlert simplified = new SimplifiedAlert();
                     simplified.setAlertName(alertName);
                     simplified.setDescription(alert.getAnnotations().getOrDefault("description", ""));
+                    simplified.setSeverity(alert.getLabels().getOrDefault("severity", "unknown"));
+                    simplified.setService(alert.getLabels().getOrDefault("service",
+                            alert.getLabels().getOrDefault("job", "unknown")));
+                    simplified.setInstance(alert.getLabels().getOrDefault("instance", "unknown"));
                     simplified.setState(alert.getState());
                     simplified.setActiveAt(alert.getActiveAt());
                     simplified.setDuration(calculateDuration(alert.getActiveAt()));
+                    simplified.setValue(alert.getValue());
+                    simplified.setLabels(new LinkedHashMap<>(alert.getLabels()));
+                    simplified.setAnnotations(new LinkedHashMap<>(alert.getAnnotations()));
                     
                     simplifiedAlerts.add(simplified);
                 }
@@ -110,6 +117,7 @@ public class QueryMetricsTools {
             
             String jsonResult = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
             logger.info("Prometheus 告警查询完成: 找到 {} 个告警", simplifiedAlerts.size());
+            logger.info("告警信息：{}", simplifiedAlerts);
             
             return jsonResult;
             
@@ -137,10 +145,16 @@ public class QueryMetricsTools {
         cpuAlert.setAlertName("HighCPUUsage");
         cpuAlert.setDescription("服务 payment-service 的 CPU 使用率持续超过 80%，当前值为 92%。" +
                 "实例: pod-payment-service-7d8f9c6b5-x2k4m，命名空间: production");
+        cpuAlert.setSeverity("critical");
+        cpuAlert.setService("payment-service");
+        cpuAlert.setInstance("pod-payment-service-7d8f9c6b5-x2k4m");
         cpuAlert.setState("firing");
         Instant cpuActiveAt = now.minus(25, ChronoUnit.MINUTES);
         cpuAlert.setActiveAt(cpuActiveAt.toString());
         cpuAlert.setDuration(calculateDuration(cpuActiveAt.toString()));
+        cpuAlert.setValue("92");
+        cpuAlert.setLabels(Map.of("alertname", "HighCPUUsage", "severity", "critical", "service", "payment-service"));
+        cpuAlert.setAnnotations(Map.of("description", cpuAlert.getDescription()));
         alerts.add(cpuAlert);
         
         // 告警2: 内存使用率过高 - 持续约15分钟
@@ -149,10 +163,16 @@ public class QueryMetricsTools {
         memoryAlert.setDescription("服务 order-service 的内存使用率持续超过 85%，当前值为 91%。" +
                 "JVM堆内存使用: 3.8GB/4GB，可能存在内存泄漏风险。" +
                 "实例: pod-order-service-5c7d8e9f1-m3n2p，命名空间: production");
+        memoryAlert.setSeverity("warning");
+        memoryAlert.setService("order-service");
+        memoryAlert.setInstance("pod-order-service-5c7d8e9f1-m3n2p");
         memoryAlert.setState("firing");
         Instant memoryActiveAt = now.minus(15, ChronoUnit.MINUTES);
         memoryAlert.setActiveAt(memoryActiveAt.toString());
         memoryAlert.setDuration(calculateDuration(memoryActiveAt.toString()));
+        memoryAlert.setValue("91");
+        memoryAlert.setLabels(Map.of("alertname", "HighMemoryUsage", "severity", "warning", "service", "order-service"));
+        memoryAlert.setAnnotations(Map.of("description", memoryAlert.getDescription()));
         alerts.add(memoryAlert);
         
         // 告警3: 响应时间过长 - 持续约10分钟
@@ -161,10 +181,16 @@ public class QueryMetricsTools {
         slowAlert.setDescription("服务 user-service 的 P99 响应时间持续超过 3 秒，当前值为 4.2 秒。" +
                 "受影响接口: /api/v1/users/profile, /api/v1/users/orders。" +
                 "可能原因：数据库慢查询或下游服务延迟");
+        slowAlert.setSeverity("warning");
+        slowAlert.setService("user-service");
+        slowAlert.setInstance("user-service-local");
         slowAlert.setState("firing");
         Instant slowActiveAt = now.minus(10, ChronoUnit.MINUTES);
         slowAlert.setActiveAt(slowActiveAt.toString());
         slowAlert.setDuration(calculateDuration(slowActiveAt.toString()));
+        slowAlert.setValue("4.2");
+        slowAlert.setLabels(Map.of("alertname", "SlowResponse", "severity", "warning", "service", "user-service"));
+        slowAlert.setAnnotations(Map.of("description", slowAlert.getDescription()));
         alerts.add(slowAlert);
         
         return alerts;
@@ -269,10 +295,19 @@ public class QueryMetricsTools {
     public static class SimplifiedAlert {
         @JsonProperty("alert_name")
         private String alertName;
-        
+
+        @JsonProperty("severity")
+        private String severity;
+
+        @JsonProperty("service")
+        private String service;
+
+        @JsonProperty("instance")
+        private String instance;
+
         @JsonProperty("description")
         private String description;
-        
+
         @JsonProperty("state")
         private String state;
         
@@ -281,6 +316,15 @@ public class QueryMetricsTools {
         
         @JsonProperty("duration")
         private String duration;
+
+        @JsonProperty("value")
+        private String value;
+
+        @JsonProperty("labels")
+        private Map<String, String> labels;
+
+        @JsonProperty("annotations")
+        private Map<String, String> annotations;
     }
     
     /**
