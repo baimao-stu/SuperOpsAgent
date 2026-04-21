@@ -3,6 +3,7 @@ package com.whitec.constant;
 public interface CommonConstant {
 
 //    String MODEL_NAME = "qwen3-max-2025-09-23";
-    String MODEL_NAME = "qwen-plus-2025-07-28";
+//    String MODEL_NAME = "qwen-plus-2025-07-28";
+    String MODEL_NAME = "qwen3.5-flash";
 
 }

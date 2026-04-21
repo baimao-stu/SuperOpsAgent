@@ -9,6 +9,7 @@ import com.whitec.agent.tool.DateTimeTools;
 import com.whitec.agent.tool.InternalDocsTools;
 import com.whitec.agent.tool.QueryLogsTools;
 import com.whitec.agent.tool.QueryMetricsTools;
+import com.whitec.config.ClsProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -37,8 +38,11 @@ public class AiOpsService {
     @Autowired
     private QueryMetricsTools queryMetricsTools;
 
-    @Autowired(required = false)  // Mock 模式下才注册
+    @Autowired
     private QueryLogsTools queryLogsTools;
+
+    @Autowired
+    private ClsProperties clsProperties;
 
     /**
      * 执行 AI Ops 告警分析流程
@@ -126,16 +130,12 @@ public class AiOpsService {
 
     /**
      * 动态构建方法工具数组
-     * 根据 cls.mock-enabled 决定是否包含 QueryLogsTools
      */
     private Object[] buildMethodToolsArray() {
-        if (queryLogsTools != null) {
-            // Mock 模式：包含 QueryLogsTools
+        if (clsProperties.isMockEnabled()) {
             return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, queryLogsTools};
-        } else {
-            // 真实模式：不包含 QueryLogsTools（由 MCP 提供日志查询功能）
-            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools};
         }
+        return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools};
     }
 
     /**
@@ -147,8 +147,12 @@ public class AiOpsService {
                 1. 读取当前输入任务 {input} 以及 Executor 的最近反馈 {executor_feedback}。
                 2. 分析 Prometheus 告警、日志、内部文档等信息，制定可执行的下一步步骤。
                 3. 在执行阶段，输出 JSON，包含 decision (PLAN|EXECUTE|FINISH)、step 描述、预期要调用的工具、以及必要的上下文。
-                4. 调用任何腾讯云日志/主题相关工具时，region 参数必须使用连字符格式（如 ap-guangzhou），若不确定请省略以使用默认值。
-                5. 严格禁止编造数据，只能引用工具返回的真实内容；如果连续 3 次调用同一工具仍失败或返回空结果，需停止该方向并在最终报告的结论部分说明"无法完成"的原因。
+                4. 当 cls.mock-enabled=false 时，优先使用 MCP 工具 GetTopicInfoByName、TextToSearchLogQuery、ConvertTimeStringToTimestamp、GetRegionCodeByName、SearchLog 查询腾讯云 CLS；仅当 cls.mock-enabled=true 时使用本地 queryLogs 工具。
+                5. 调用任何腾讯云日志/主题相关工具时，region 参数必须使用连字符格式（如 ap-guangzhou），若不确定请省略以使用默认值。
+                6. 使用 SearchLog 时，时间范围只能通过 From/To 控制，且 From/To 必须是毫秒级 Unix 时间戳；如需“最近 15 分钟 / 1 小时 / 10 小时”等范围，先得到时间字符串，再调用 ConvertTimeStringToTimestamp 转为毫秒。
+                7. 严禁在 Query 中比较 time、__TIMESTAMP__、date 等时间字段，也不要把 2026-04-21T17:36:26.606+0800 这类时间字符串直接写进 CQL；Query 只用于 message、level、service、location 等日志字段过滤。
+                8. 若使用 TextToSearchLogQuery 生成 CQL，自然语言里不要描述“按某个时间字符串过滤”，时间条件统一放到 SearchLog 的 From/To 参数中。
+                9. 严格禁止编造数据，只能引用工具返回的真实内容；如果连续 3 次调用同一工具仍失败或返回空结果，需停止该方向并在最终报告的结论部分说明"无法完成"的原因。
                 
                 ## 最终报告输出要求（CRITICAL）
                 
@@ -242,6 +246,10 @@ public class AiOpsService {
         return """
                 你是 Executor Agent，负责读取 Planner 最新输出 {planner_plan}，只执行其中的第一步。
                 - 确认步骤所需的工具与参数，尤其是 region 参数要使用连字符格式（ap-guangzhou）；若 Planner 未给出则使用默认区域。
+                - 若要查询腾讯云 CLS 日志且 cls.mock-enabled=false，优先使用 MCP 工具链：GetTopicInfoByName / TextToSearchLogQuery / ConvertTimeStringToTimestamp / SearchLog。
+                - SearchLog 的 From / To 必须是毫秒级 Unix 时间戳；不要传秒级时间戳，也不要传 ISO 8601 时间字符串。
+                - Query 里禁止写 time / __TIMESTAMP__ / date 等时间比较条件；时间范围只能放在 SearchLog 的 From / To 中。
+                - 对当前项目日志，优先查询 message、level、service、location 字段，例如 message:"request start" OR message:"RuntimeException"。
                 - 调用相应的工具并收集结果，如工具返回错误或空数据，需要将失败原因、请求参数一并记录，并停止进一步调用该工具（同一工具失败达到 3 次时应直接返回 FAILED）。
                 - 将日志、指标、文档等证据整理成结构化摘要，标注对应的告警名称或资源，方便 Planner 填充"告警根因分析 / 处理方案执行"章节。
                 - 以 JSON 形式返回执行状态、证据以及给 Planner 的建议，写入 executor_feedback，严禁编造未实际查询到的内容。
@@ -268,7 +276,7 @@ public class AiOpsService {
                 3. 根据 executor_agent 的反馈，评估是否需要再次调用 planner_agent，直到 decision=FINISH。
                 4. FINISH 后，确保向最终用户输出完整的《告警分析报告》，格式必须严格为：
                    告警分析报告\n---\n# 告警处理详情\n## 活跃告警清单\n## 告警根因分析N\n## 处理方案执行N\n## 结论。
-                5. 若步骤涉及腾讯云日志/主题工具，请确保使用连字符区域 ID（ap-guangzhou 等），或省略 region 以采用默认值。
+                5. 若步骤涉及腾讯云日志/主题工具，请确保使用连字符区域 ID（ap-guangzhou 等），或省略 region 以采用默认值；真实模式优先使用 CLS MCP Server 工具。
                 6. 如果发现 Planner/Executor 在同一方向连续 3 次调用工具仍失败或没有数据，必须终止流程，直接输出"任务无法完成"的报告，明确告知失败原因，严禁凭空编造结果。
 
                 只允许在 planner_agent、executor_agent 与 FINISH 之间做出选择。

@@ -1,21 +1,34 @@
 package com.whitec.agent.tool;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.tencentcloudapi.cls.v20201016.ClsClient;
+import com.tencentcloudapi.cls.v20201016.models.LogInfo;
+import com.tencentcloudapi.cls.v20201016.models.SearchLogRequest;
+import com.tencentcloudapi.cls.v20201016.models.SearchLogResponse;
+import com.tencentcloudapi.common.Credential;
+import com.tencentcloudapi.common.exception.TencentCloudSDKException;
+import com.tencentcloudapi.common.profile.ClientProfile;
+import com.tencentcloudapi.common.profile.HttpProfile;
+import com.whitec.config.ClsProperties;
 import lombok.Data;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -34,9 +47,11 @@ public class QueryLogsTools {
     public static final String TOOL_GET_AVAILABLE_LOG_TOPICS = "getAvailableLogTopics";
     
     private final ObjectMapper objectMapper = new ObjectMapper();
-    
-    @Value("${cls.mock-enabled:false}")
-    private boolean mockEnabled;
+
+    @Autowired
+    private ClsProperties clsProperties;
+
+    private ClsClient clsClient;
     
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter
             .ofPattern("yyyy-MM-dd HH:mm:ss")
@@ -44,7 +59,12 @@ public class QueryLogsTools {
     
     @jakarta.annotation.PostConstruct
     public void init() {
-        logger.info("✅ QueryLogsTools 初始化成功, Mock模式: {}", mockEnabled);
+        if (!clsProperties.isMockEnabled() && hasRealClsCredentials()) {
+            this.clsClient = createClsClient();
+        }
+
+        logger.info("✅ QueryLogsTools 初始化成功, Mock模式: {}, 默认地域: {}, 已配置主题数: {}",
+                clsProperties.isMockEnabled(), clsProperties.getRegion(), clsProperties.getTopics().size());
     }
     
     /**
@@ -64,6 +84,7 @@ public class QueryLogsTools {
             LogTopicInfo systemMetrics = new LogTopicInfo();
             systemMetrics.setTopicName("system-metrics");
             systemMetrics.setDescription("系统指标日志，包含 CPU、内存、磁盘使用率等系统资源监控数据");
+            systemMetrics.setTopicId(resolveConfiguredTopicId("system-metrics"));
             systemMetrics.setExampleQueries(List.of(
                     "cpu_usage:>80",
                     "memory_usage:>85",
@@ -77,6 +98,7 @@ public class QueryLogsTools {
             LogTopicInfo applicationLogs = new LogTopicInfo();
             applicationLogs.setTopicName("application-logs");
             applicationLogs.setDescription("应用日志，包含应用程序的错误日志、警告日志、慢请求日志、下游依赖调用日志等");
+            applicationLogs.setTopicId(resolveConfiguredTopicId("application-logs"));
             applicationLogs.setExampleQueries(List.of(
                     "level:ERROR",
                     "level:FATAL",
@@ -92,6 +114,7 @@ public class QueryLogsTools {
             LogTopicInfo dbSlowQuery = new LogTopicInfo();
             dbSlowQuery.setTopicName("database-slow-query");
             dbSlowQuery.setDescription("数据库慢查询日志，包含执行时间较长的 SQL 查询，可用于分析数据库性能问题");
+            dbSlowQuery.setTopicId(resolveConfiguredTopicId("database-slow-query"));
             dbSlowQuery.setExampleQueries(List.of(
                     "query_time:>2",
                     "table:orders",
@@ -105,6 +128,7 @@ public class QueryLogsTools {
             LogTopicInfo systemEvents = new LogTopicInfo();
             systemEvents.setTopicName("system-events");
             systemEvents.setDescription("系统事件日志，包含 Kubernetes Pod 重启、OOM Kill、容器崩溃等系统级事件");
+            systemEvents.setTopicId(resolveConfiguredTopicId("system-events"));
             systemEvents.setExampleQueries(List.of(
                     "restart OR crash",
                     "oom_kill",
@@ -119,9 +143,13 @@ public class QueryLogsTools {
             output.setSuccess(true);
             output.setTopics(topics);
             output.setAvailableRegions(List.of("ap-guangzhou", "ap-shanghai", "ap-beijing", "ap-chengdu"));
-            output.setDefaultRegion("ap-guangzhou");
+            output.setDefaultRegion(resolveRegion(null));
 
-            output.setMessage(String.format("共有 %d 个可用的日志主题。建议使用默认地域 'ap-guangzhou' 或省略 region 参数", topics.size()));
+            output.setMessage(String.format(
+                    "共有 %d 个可用的日志主题。当前模式: %s，建议使用默认地域 '%s' 或省略 region 参数",
+                    topics.size(),
+                    clsProperties.isMockEnabled() ? "mock" : "real",
+                    resolveRegion(null)));
             
             return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
             
@@ -144,8 +172,6 @@ public class QueryLogsTools {
     private static final List<String> VALID_REGIONS = List.of(
             "ap-guangzhou", "ap-shanghai", "ap-beijing", "ap-chengdu"
     );
-
-    private static final String DEFAULT_REGION = "ap-guangzhou";
     
     @Tool(description = "Query logs from Cloud Log Service (CLS). " +
             "Use this tool to search application logs, system metrics, and other log data. " +
@@ -165,28 +191,28 @@ public class QueryLogsTools {
             @ToolParam(description = "返回日志条数，默认20，最大100") Integer limit) {
         
         int actualLimit = (limit == null || limit <= 0) ? 20 : Math.min(limit, 100);
-        
+        String resolvedRegion = resolveRegion(region);
+        String safeTopic = logTopic == null ? "" : logTopic.trim();
         String safeQuery = query == null ? "" : query;
-        
 
         try {
             List<LogEntry> logEntries;
             
-            if (mockEnabled) {
+            if (clsProperties.isMockEnabled()) {
                 // Mock 模式：返回与告警关联的模拟日志数据
-                logEntries = buildMockLogs(region, logTopic, safeQuery, actualLimit);
+                logEntries = buildMockLogs(resolvedRegion, safeTopic, safeQuery, actualLimit);
                 logger.info("使用 Mock 数据，返回 {} 条日志", logEntries.size());
             } else {
-                // 真实模式：调用 CLS API（这里预留接口，后续实现）
-                return buildErrorResponse("CLS 真实查询尚未实现，请启用 mock 模式进行测试");
+                logEntries = fetchRealLogs(resolvedRegion, safeTopic, safeQuery, actualLimit);
+                logger.info("使用真实 CLS 数据，返回 {} 条日志", logEntries.size());
             }
             
             // 构建成功响应
             QueryLogsOutput output = new QueryLogsOutput();
             output.setSuccess(!logEntries.isEmpty());
-            output.setRegion(region);
-            output.setLogTopic(logTopic);
-            output.setQuery(safeQuery.isBlank() ? "DEFAULT_QUERY" : safeQuery);
+            output.setRegion(resolvedRegion);
+            output.setLogTopic(safeTopic);
+            output.setQuery(resolveEffectiveQuery(safeTopic, safeQuery));
             output.setLogs(logEntries);
             output.setTotal(logEntries.size());
             output.setMessage(logEntries.isEmpty() ? "未找到匹配的日志" : String.format("成功查询到 %d 条日志", logEntries.size()));
@@ -200,6 +226,268 @@ public class QueryLogsTools {
             logger.error("查询日志失败", e);
             return buildErrorResponse("查询失败: " + e.getMessage());
         }
+    }
+
+    private boolean hasRealClsCredentials() {
+        return notBlank(clsProperties.getSecretId()) && notBlank(clsProperties.getSecretKey());
+    }
+
+    private ClsClient createClsClient() {
+        Credential credential = new Credential(clsProperties.getSecretId(), clsProperties.getSecretKey());
+
+        HttpProfile httpProfile = new HttpProfile();
+        httpProfile.setEndpoint("cls.tencentcloudapi.com");
+        httpProfile.setConnTimeout((int) Duration.ofSeconds(clsProperties.getTimeoutSeconds()).toSeconds());
+
+        ClientProfile clientProfile = new ClientProfile();
+        clientProfile.setHttpProfile(httpProfile);
+        return new ClsClient(credential, clsProperties.getRegion(), clientProfile);
+    }
+
+    private List<LogEntry> fetchRealLogs(String region, String logTopic, String query, int limit) throws Exception {
+        if (!hasRealClsCredentials()) {
+            throw new IllegalStateException("CLS 凭证未配置，请设置 cls.secret-id / cls.secret-key 或环境变量 TENCENT_SECRET_ID / TENCENT_SECRET_KEY");
+        }
+
+        if (clsClient == null) {
+            clsClient = createClsClient();
+        }
+
+        String topicId = resolveTopicId(logTopic);
+        if (!notBlank(topicId)) {
+            throw new IllegalArgumentException("日志主题未配置 TopicId: " + logTopic + "，请在 cls.topics 中配置映射，或直接传入真实 TopicId");
+        }
+
+        String effectiveQuery = resolveEffectiveQuery(logTopic, query);
+        Instant now = Instant.now();
+        Instant from = now.minus(clsProperties.getDefaultLookbackMinutes(), ChronoUnit.MINUTES);
+
+        SearchLogRequest request = new SearchLogRequest();
+        request.setFrom(from.getEpochSecond());
+        request.setTo(now.getEpochSecond());
+        request.setTopicId(topicId);
+        request.setQueryString(effectiveQuery);
+        request.setQuery(effectiveQuery);
+        request.setQuerySyntax(1L);
+        request.setSyntaxRule(1L);
+        request.setSort("desc");
+        request.setLimit((long) limit);
+        request.setOffset(0L);
+        request.setUseNewAnalysis(Boolean.TRUE);
+        request.setHighLight(Boolean.TRUE);
+
+        try {
+            SearchLogResponse response = clsClient.SearchLog(request);
+            LogInfo[] results = response.getResults();
+            if (results == null || results.length == 0) {
+                return Collections.emptyList();
+            }
+
+            List<LogEntry> entries = new ArrayList<>(Math.min(results.length, limit));
+            for (LogInfo result : results) {
+                entries.add(toLogEntry(result, region, logTopic));
+            }
+            return entries;
+        } catch (TencentCloudSDKException e) {
+            logger.error("CLS 查询失败, region: {}, topic: {}, query: {}", region, logTopic, effectiveQuery, e);
+            throw new IllegalStateException("CLS 查询失败: " + e.getMessage(), e);
+        }
+    }
+
+    private LogEntry toLogEntry(LogInfo logInfo, String region, String logTopic) {
+        Map<String, String> parsedFields = parseLogFields(logInfo.getLogJson());
+        LinkedHashMap<String, String> metrics = buildMetrics(logInfo, parsedFields, region, logTopic);
+
+        LogEntry entry = new LogEntry();
+        entry.setTimestamp(formatEpochSeconds(logInfo.getTime()));
+        entry.setLevel(firstNonBlank(
+                parsedFields.get("level"),
+                parsedFields.get("severity"),
+                parsedFields.get("loglevel"),
+                "INFO"));
+        entry.setService(firstNonBlank(
+                parsedFields.get("service"),
+                parsedFields.get("service_name"),
+                parsedFields.get("app"),
+                parsedFields.get("application"),
+                logInfo.getTopicName(),
+                "unknown-service"));
+        entry.setInstance(firstNonBlank(
+                parsedFields.get("instance"),
+                parsedFields.get("pod"),
+                parsedFields.get("host"),
+                parsedFields.get("hostname"),
+                logInfo.getHostName(),
+                logInfo.getSource(),
+                "unknown-instance"));
+        entry.setMessage(resolveMessage(logInfo, parsedFields));
+        entry.setMetrics(metrics);
+        return entry;
+    }
+
+    private LinkedHashMap<String, String> buildMetrics(LogInfo logInfo, Map<String, String> parsedFields, String region, String logTopic) {
+        LinkedHashMap<String, String> metrics = new LinkedHashMap<>();
+        putIfNotBlank(metrics, "region", region);
+        putIfNotBlank(metrics, "topic", logTopic);
+        putIfNotBlank(metrics, "topic_id", logInfo.getTopicId());
+        putIfNotBlank(metrics, "topic_name", logInfo.getTopicName());
+        putIfNotBlank(metrics, "source", logInfo.getSource());
+        putIfNotBlank(metrics, "host_name", logInfo.getHostName());
+        putIfNotBlank(metrics, "file_name", logInfo.getFileName());
+
+        for (Map.Entry<String, String> entry : parsedFields.entrySet()) {
+            String key = entry.getKey();
+            if (isReservedField(key)) {
+                continue;
+            }
+            putIfNotBlank(metrics, key, entry.getValue());
+            if (metrics.size() >= 12) {
+                break;
+            }
+        }
+
+        if (metrics.isEmpty()) {
+            putIfNotBlank(metrics, "raw_log", logInfo.getRawLog());
+        }
+        return metrics;
+    }
+
+    private Map<String, String> parseLogFields(String logJson) {
+        if (!notBlank(logJson)) {
+            return Collections.emptyMap();
+        }
+
+        try {
+            JsonNode root = objectMapper.readTree(logJson);
+            if (!root.isObject()) {
+                return Collections.emptyMap();
+            }
+
+            LinkedHashMap<String, String> fields = new LinkedHashMap<>();
+            root.fields().forEachRemaining(entry -> {
+                JsonNode value = entry.getValue();
+                if (value == null || value.isNull()) {
+                    return;
+                }
+                if (value.isValueNode()) {
+                    fields.put(entry.getKey(), value.asText());
+                } else {
+                    fields.put(entry.getKey(), value.toString());
+                }
+            });
+            return fields;
+        } catch (Exception e) {
+            logger.debug("解析 CLS LogJson 失败，按原始日志处理: {}", logJson, e);
+            return Collections.emptyMap();
+        }
+    }
+
+    private String resolveMessage(LogInfo logInfo, Map<String, String> parsedFields) {
+        String message = firstNonBlank(
+                parsedFields.get("message"),
+                parsedFields.get("msg"),
+                parsedFields.get("content"),
+                parsedFields.get("__content__"),
+                parsedFields.get("__rawlog__"),
+                parsedFields.get("raw_log"),
+                logInfo.getRawLog());
+        if (notBlank(message)) {
+            return message;
+        }
+        if (notBlank(logInfo.getLogJson())) {
+            return logInfo.getLogJson();
+        }
+        return "CLS 日志内容为空";
+    }
+
+    private String resolveTopicId(String logTopic) {
+        if (!notBlank(logTopic)) {
+            return resolveConfiguredTopicId("application-logs");
+        }
+
+        String configured = resolveConfiguredTopicId(logTopic);
+        return notBlank(configured) ? configured : logTopic;
+    }
+
+    private String resolveConfiguredTopicId(String alias) {
+        if (!notBlank(alias) || clsProperties.getTopics() == null) {
+            return null;
+        }
+        return clsProperties.getTopics().get(alias);
+    }
+
+    private String resolveEffectiveQuery(String logTopic, String query) {
+        if (notBlank(query)) {
+            return query.trim();
+        }
+
+        String safeTopic = logTopic == null ? "" : logTopic.trim().toLowerCase();
+        return switch (safeTopic) {
+            case "system-metrics" -> "cpu_usage:>80 OR memory_usage:>85 OR disk_usage:>90";
+            case "database-slow-query" -> "query_time:>2";
+            case "system-events" -> "restart OR crash OR oom OR OOMKilled";
+            case "application-logs" -> "level:ERROR OR slow OR timeout OR exception";
+            default -> "*";
+        };
+    }
+
+    private String resolveRegion(String region) {
+        String candidate = notBlank(region) ? region.trim() : clsProperties.getRegion();
+        if (!VALID_REGIONS.contains(candidate)) {
+            logger.warn("收到非预置地域 {}, 自动回退到默认地域 {}", candidate, clsProperties.getRegion());
+            return clsProperties.getRegion();
+        }
+        return candidate;
+    }
+
+    private String formatEpochSeconds(Long epochSeconds) {
+        if (epochSeconds == null) {
+            return FORMATTER.format(Instant.now());
+        }
+        return FORMATTER.format(Instant.ofEpochSecond(epochSeconds));
+    }
+
+    private boolean isReservedField(String key) {
+        if (!notBlank(key)) {
+            return true;
+        }
+        String normalized = key.toLowerCase();
+        return normalized.equals("message")
+                || normalized.equals("msg")
+                || normalized.equals("content")
+                || normalized.equals("__content__")
+                || normalized.equals("__rawlog__")
+                || normalized.equals("raw_log")
+                || normalized.equals("service")
+                || normalized.equals("service_name")
+                || normalized.equals("app")
+                || normalized.equals("application")
+                || normalized.equals("instance")
+                || normalized.equals("pod")
+                || normalized.equals("host")
+                || normalized.equals("hostname")
+                || normalized.equals("level")
+                || normalized.equals("severity")
+                || normalized.equals("loglevel");
+    }
+
+    private void putIfNotBlank(Map<String, String> target, String key, String value) {
+        if (notBlank(key) && notBlank(value)) {
+            target.putIfAbsent(key, value);
+        }
+    }
+
+    private String firstNonBlank(String... candidates) {
+        for (String candidate : candidates) {
+            if (notBlank(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private boolean notBlank(String value) {
+        return value != null && !value.trim().isEmpty();
     }
 
     /**
@@ -660,6 +948,9 @@ public class QueryLogsTools {
     public static class LogTopicInfo {
         @JsonProperty("topic_name")
         private String topicName;
+
+        @JsonProperty("topic_id")
+        private String topicId;
         
         @JsonProperty("description")
         private String description;

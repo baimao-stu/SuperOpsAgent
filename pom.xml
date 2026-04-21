@@ -21,6 +21,7 @@
         <spring-ai.version>1.1.0</spring-ai.version>
         <spring-ai-alibaba.version>1.1.0.0-RC2</spring-ai-alibaba.version>
         <spring-ai-alibaba-extensions.version>1.1.0.0-RC2</spring-ai-alibaba-extensions.version>
+        <tencentcloud-sdk.version>3.1.1445</tencentcloud-sdk.version>
     </properties>
     <dependencyManagement>
         <dependencies>
@@ -142,6 +143,12 @@
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-mcp-client-webflux</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.tencentcloudapi</groupId>
+            <artifactId>tencentcloud-sdk-java-cls</artifactId>
+            <version>${tencentcloud-sdk.version}</version>
         </dependency>
     </dependencies>
 

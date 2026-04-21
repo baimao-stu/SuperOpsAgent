@@ -14,6 +14,8 @@
 
 ## 排查步骤
 
+> 使用腾讯云 CLS `SearchLog` 时，时间范围必须通过 `From/To` 传入，禁止在 `Query` 里写 `time`、`__TIMESTAMP__`、`date` 等时间字段条件。
+
 ### 步骤1: 获取当前时间
 **工具**: `get_current_time`
 **目的**: 确定告警发生的准确时间

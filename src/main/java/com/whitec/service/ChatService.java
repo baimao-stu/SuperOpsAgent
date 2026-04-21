@@ -9,6 +9,7 @@ import com.whitec.agent.tool.DateTimeTools;
 import com.whitec.agent.tool.InternalDocsTools;
 import com.whitec.agent.tool.QueryLogsTools;
 import com.whitec.agent.tool.QueryMetricsTools;
+import com.whitec.config.ClsProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
@@ -40,11 +41,14 @@ public class ChatService {
     @Autowired
     private QueryMetricsTools queryMetricsTools;
 
-    @Autowired(required = false)  // Mock 模式下才注册，所以设置为 optional,真实环境通过mcp配置注入
+    @Autowired
     private QueryLogsTools queryLogsTools;
 
     @Autowired
     private ToolCallbackProvider tools;
+
+    @Autowired
+    private ClsProperties clsProperties;
 
     @Value("${spring.ai.dashscope.api-key}")
     private String dashScopeApiKey;
@@ -97,7 +101,12 @@ public class ChatService {
         systemPromptBuilder.append("当用户询问时间相关问题时，使用 getCurrentDateTime 工具。\n");
         systemPromptBuilder.append("当用户需要查询公司内部文档、流程、最佳实践或技术指南时，使用 queryInternalDocs 工具。\n");
         systemPromptBuilder.append("当用户需要查询 Prometheus 告警、监控指标或系统告警状态时，使用 queryPrometheusAlerts 工具。\n");
-        systemPromptBuilder.append("当用户需要查询腾讯云日志时，请调用腾讯云mcp服务查询,默认查询地域ap-guangzhou,查询时间范围为近一个月。\n\n");
+        if (clsProperties.isMockEnabled()) {
+            systemPromptBuilder.append("当用户需要查询腾讯云日志时，请优先使用 queryLogs / getAvailableLogTopics 工具，默认查询地域 ap-guangzhou，查询时间范围为近一个月。\n\n");
+        } else {
+            systemPromptBuilder.append("当用户需要查询腾讯云 CLS 日志时，请优先使用 MCP 提供的 GetTopicInfoByName、TextToSearchLogQuery、ConvertTimeStringToTimestamp、GetRegionCodeByName、SearchLog 工具。\n");
+            systemPromptBuilder.append("调用 SearchLog 前，先确认 region、topicId、query、from、to 参数；region 默认使用 ap-guangzhou。\n\n");
+        }
         
         // 添加历史消息
         if (!history.isEmpty()) {
@@ -121,16 +130,12 @@ public class ChatService {
 
     /**
      * 动态构建方法工具数组
-     * 根据 cls.mock-enabled 决定是否包含 QueryLogsTools
      */
     public Object[] buildMethodToolsArray() {
-        if (queryLogsTools != null) {
-            // Mock 模式：包含 QueryLogsTools
+        if (clsProperties.isMockEnabled()) {
             return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, queryLogsTools};
-        } else {
-            // 真实模式：不包含 QueryLogsTools（由 MCP 提供日志查询功能）
-            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools};
         }
+        return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools};
     }
 
     /**
